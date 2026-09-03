@@ -1,0 +1,12 @@
+[
+  "function owner() view returns (address)",
+  "function minters(address) view returns (bool)",
+  "function addMinter(address account)",
+  "function removeMinter(address account)",
+  "function award(bytes32 userId, uint256 amount, string reason, string refId)",
+  "function redeem(bytes32 userId, uint256 amount, string rewardId)",
+  "function balanceOf(bytes32 userId) view returns (uint256)",
+  "function transferOwnership(address newOwner)",
+  "event EcoAwarded(bytes32 indexed userId, uint256 amount, string reason, string refId)",
+  "event EcoRedeemed(bytes32 indexed userId, uint256 amount, string rewardId)"
+]
