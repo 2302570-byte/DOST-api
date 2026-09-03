@@ -5,6 +5,7 @@ const http     = require('http');
 
 const authRoutes    = require('./routes/auth.routes');
 const binRoutes     = require('./routes/binScanRoutes');
+const tierRoutes    = require('./routes/tiersRoutes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -34,6 +35,7 @@ app.use(express.json());
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/bins', binRoutes);
+app.use('/api/tiers', tierRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {

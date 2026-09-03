@@ -32,7 +32,21 @@ CREATE TABLE IF NOT EXISTS public.users (
   updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
--- bins
+-- tiers
+CREATE TABLE IF NOT EXISTS public.tiers (
+  id               UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  name             VARCHAR(50)  NOT NULL,
+  capacity_liters  INTEGER,
+  created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Default tier seeds
+INSERT INTO public.tiers (name, capacity_liters) SELECT 'Tier 1', 660  WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 1');
+INSERT INTO public.tiers (name, capacity_liters) SELECT 'Tier 2', 1100 WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 2');
+INSERT INTO public.tiers (name, capacity_liters) SELECT 'Tier 3', NULL WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 3');
+
+
 CREATE TABLE IF NOT EXISTS public.bins (
   id                     UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   name                   VARCHAR(150) NOT NULL,
@@ -40,9 +54,7 @@ CREATE TABLE IF NOT EXISTS public.bins (
   barangay               VARCHAR(150),
   barangay_code          VARCHAR(50),
   cluster_id             VARCHAR(50),
-  capacity_tier          VARCHAR(20)  NOT NULL DEFAULT 'Tier 1',
-  capacity_volume_liters INTEGER,
-  waste_type             VARCHAR(50)  NOT NULL DEFAULT 'Biodegradable',
+  tier_id                UUID REFERENCES public.tiers(id) ON DELETE SET NULL,
   sticker_dimensions     VARCHAR(30)  DEFAULT '15cm x 15cm',
   latitude               NUMERIC(10, 7),
   longitude              NUMERIC(10, 7),
@@ -73,7 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_users_email        ON public.users(email);
 CREATE INDEX IF NOT EXISTS idx_users_role         ON public.users(role);
 CREATE INDEX IF NOT EXISTS idx_bins_barangay      ON public.bins(barangay);
 CREATE INDEX IF NOT EXISTS idx_bins_status        ON public.bins(status);
-CREATE INDEX IF NOT EXISTS idx_bins_waste_type    ON public.bins(waste_type);
+CREATE INDEX IF NOT EXISTS idx_bins_tier_id       ON public.bins(tier_id);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_bin_id   ON public.scan_logs(bin_id);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_reporter ON public.scan_logs(reporter_id);
 
@@ -85,6 +97,11 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+
+DROP TRIGGER IF EXISTS trg_tiers_updated_at ON public.tiers;
+CREATE TRIGGER trg_tiers_updated_at
+  BEFORE UPDATE ON public.tiers
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_users_updated_at ON public.users;
 CREATE TRIGGER trg_users_updated_at
