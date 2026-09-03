@@ -1,9 +1,7 @@
--- ─────────────────────────────────────────────────────────────────────────────
--- BE-SMART Full Database Schema — dostbesmart_db
+-- BE-SMART Full Database Schema - dostbesmart_db
 -- Run this to set up a fresh database from scratch
--- ─────────────────────────────────────────────────────────────────────────────
 
--- ── Custom types ──────────────────────────────────────────────────────────────
+-- Custom types
 DO $$ BEGIN
   CREATE TYPE user_role AS ENUM (
     'super_admin',
@@ -18,7 +16,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
--- ── users ─────────────────────────────────────────────────────────────────────
+-- users
 CREATE TABLE IF NOT EXISTS public.users (
   id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
   name          VARCHAR(100)  NOT NULL,
@@ -34,7 +32,7 @@ CREATE TABLE IF NOT EXISTS public.users (
   updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
--- ── bins ──────────────────────────────────────────────────────────────────────
+-- bins
 CREATE TABLE IF NOT EXISTS public.bins (
   id                     UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   name                   VARCHAR(150) NOT NULL,
@@ -58,7 +56,7 @@ CREATE TABLE IF NOT EXISTS public.bins (
     CHECK (status IN ('EMPTY', 'PARTIAL', 'FULL', 'COLLECTED', 'LOCKED', 'MISSED'))
 );
 
--- ── scan_logs ─────────────────────────────────────────────────────────────────
+-- scan_logs
 CREATE TABLE IF NOT EXISTS public.scan_logs (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   bin_id      UUID        NOT NULL REFERENCES public.bins(id) ON DELETE CASCADE,
@@ -70,7 +68,7 @@ CREATE TABLE IF NOT EXISTS public.scan_logs (
   scanned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── Indexes ───────────────────────────────────────────────────────────────────
+-- Indexes
 CREATE INDEX IF NOT EXISTS idx_users_email        ON public.users(email);
 CREATE INDEX IF NOT EXISTS idx_users_role         ON public.users(role);
 CREATE INDEX IF NOT EXISTS idx_bins_barangay      ON public.bins(barangay);
@@ -79,7 +77,7 @@ CREATE INDEX IF NOT EXISTS idx_bins_waste_type    ON public.bins(waste_type);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_bin_id   ON public.scan_logs(bin_id);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_reporter ON public.scan_logs(reporter_id);
 
--- ── Auto updated_at trigger ───────────────────────────────────────────────────
+-- Auto updated_at trigger
 CREATE OR REPLACE FUNCTION public.set_updated_at()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
