@@ -210,7 +210,8 @@ async function verifyBalance(req, res) {
 // Transaction history for a resident (earned + redeemed).
 async function getTransactions(req, res) {
   try {
-    const earned = await pool.query(
+    // ECO earned from MRF waste submissions
+    const wasteEarned = await pool.query(
       `SELECT
          ws.id,
          'earned'              AS type,
@@ -226,6 +227,30 @@ async function getTransactions(req, res) {
        ORDER BY ws.created_at DESC`,
       [req.user.id]
     );
+
+    // ECO earned from bin scan collections
+    const binEarned = await pool.query(
+      `SELECT
+         sl.id,
+         'earned'              AS type,
+         sl.eco_awarded        AS amount,
+         CONCAT('Bin Collection · ', b.name) AS title,
+         NULL                  AS weight_kg,
+         sl.eco_tx_hash        AS tx_hash,
+         sl.eco_tx_status      AS tx_status,
+         sl.collected_at       AS created_at
+       FROM scan_logs sl
+       JOIN bins b ON b.id = sl.bin_id
+       WHERE sl.reporter_id = $1
+         AND sl.eco_tx_status = 'confirmed'
+         AND sl.collected_at IS NOT NULL
+       ORDER BY sl.collected_at DESC`,
+      [req.user.id]
+    );
+
+    // Merge and sort by date descending
+    const allEarned = [...wasteEarned.rows, ...binEarned.rows]
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
     const redeemed = await pool.query(
       `SELECT
@@ -244,7 +269,7 @@ async function getTransactions(req, res) {
     );
 
     res.json({
-      earned:   earned.rows,
+      earned:   allEarned,
       redeemed: redeemed.rows,
     });
   } catch (err) {
