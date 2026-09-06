@@ -28,9 +28,9 @@ function authenticate(req, res, next) {
 router.get('/', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT * FROM public.tiers ORDER BY name ASC'
+      'SELECT id, name, capacity_liters, eco_reward FROM public.tiers ORDER BY name ASC'
     );
-    return res.status(200).json({ tiers: result.rows });
+    return res.status(200).json(result.rows);  // return array directly
   } catch (err) {
     console.error('Get tiers error:', err);
     return res.status(500).json({ error: 'Internal server error.' });
