@@ -4,10 +4,13 @@ const cors     = require('cors');
 const helmet   = require('helmet');
 const http     = require('http');
 
-const authRoutes = require('./routes/auth.routes');
-const ecoRoutes  = require('./routes/eco.routes');
-const binRoutes  = require('./routes/binScanRoutes');
-const tierRoutes = require('./routes/tiersRoutes');
+const authRoutes  = require('./routes/auth.routes');
+const ecoRoutes   = require('./routes/eco.routes');
+const binRoutes   = require('./routes/binScanRoutes');
+const tierRoutes  = require('./routes/tiersRoutes');
+const routingRoutes = require('./routes/routingRoutes');
+const truckRoutes = require('./routes/trucksRoutes');
+const userRoutes  = require('./routes/usersRoutes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -35,11 +38,22 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json());
 
+// Disable caching for all API responses so map always gets fresh data
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
+
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.use('/api/auth',  authRoutes);
-app.use('/api/eco',   ecoRoutes);
-app.use('/api/bins',  binRoutes);
-app.use('/api/tiers', tierRoutes);
+app.use('/api/auth',    authRoutes);
+app.use('/api/eco',     ecoRoutes);
+app.use('/api/bins',    binRoutes);
+app.use('/api/tiers',   tierRoutes);
+app.use('/api/routing', routingRoutes);
+app.use('/api/trucks',  truckRoutes);
+app.use('/api/users',   userRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {

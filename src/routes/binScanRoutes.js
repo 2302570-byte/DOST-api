@@ -33,12 +33,12 @@ router.get('/', authenticate, async (req, res) => {
       `SELECT b.id, b.name, b.street, b.barangay, b.barangay_code, b.cluster_id,
               b.tier_id, t.name AS tier_name, t.capacity_liters, t.eco_reward,
               b.sticker_dimensions, b.latitude, b.longitude,
-              b.status, b.fill_photo_url, b.qr_payload,
+              b.status, b.is_depot, b.fill_photo_url, b.qr_payload,
               b.created_at, b.updated_at
          FROM public.bins b
          LEFT JOIN public.tiers t ON t.id = b.tier_id
          ${where}
-         ORDER BY b.created_at DESC`,
+         ORDER BY b.is_depot DESC, b.created_at DESC`,
       values
     );
     return res.status(200).json({ bins: result.rows });
@@ -112,6 +112,36 @@ router.post('/', authenticate, async (req, res) => {
     });
   } catch (err) {
     console.error('Create bin error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// ── GET /api/bins/activity ────────────────────────────────────────────────────
+// Returns the latest N scan events (bin reported + collected) for the activity feed.
+// Each row has: event, description, timestamp — same shape as mock RECENT_ACTIVITY.
+router.get('/activity', authenticate, async (req, res) => {
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? '20', 10)));
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         sl.id,
+         CASE WHEN sl.collected_at IS NOT NULL THEN 'collection_confirmed' ELSE 'bin_reported' END AS event,
+         CASE
+           WHEN sl.collected_at IS NOT NULL
+             THEN b.name || ' (' || COALESCE(b.barangay,'') || ') marked as collected'
+           ELSE
+             b.name || ' (' || COALESCE(b.barangay,'') || ') reported full by resident'
+         END AS description,
+         CASE WHEN sl.collected_at IS NOT NULL THEN sl.collected_at ELSE sl.scanned_at END AS timestamp
+       FROM public.scan_logs sl
+       JOIN public.bins b ON b.id = sl.bin_id
+       ORDER BY timestamp DESC
+       LIMIT $1`,
+      [limit]
+    );
+    return res.status(200).json({ activity: rows });
+  } catch (err) {
+    console.error('Activity feed error:', err);
     return res.status(500).json({ error: 'Internal server error.' });
   }
 });
@@ -212,25 +242,33 @@ router.post(
       // State machine checks
       if (bin.status === 'FULL') {
         await client.query('ROLLBACK');
-        return res.status(409).json({
-          error:  'Already scanned by a resident.',
-          status: bin.status,
-        });
+        return res.status(409).json({ error: 'Already scanned by a resident.', status: bin.status });
       }
       if (bin.status === 'COLLECTED') {
         await client.query('ROLLBACK');
-        return res.status(409).json({
-          error:  'This bin has already been collected.',
-          status: bin.status,
-        });
+        return res.status(409).json({ error: 'This bin has already been collected.', status: bin.status });
       }
-      if (bin.status === 'LOCKED') {
+      if (bin.status === 'QUEUED') {
         await client.query('ROLLBACK');
-        return res.status(409).json({
-          error:  'This bin is locked and cannot be reported.',
-          status: bin.status,
-        });
+        return res.status(409).json({ error: 'This bin is already queued for collection.', status: bin.status });
       }
+
+      // ── NEW: AI IMAGE VERIFICATION ──────────────────────────────────────────
+      if (photo_url) {
+        // Uncomment and implement this when your AI service is ready:
+        
+        // const aiService = require('../utils/aiService');
+        // const aiResult = await aiService.verifyWasteImage(photo_url);
+        // 
+        // if (!aiResult.isVerified) {
+        //   await client.query('ROLLBACK');
+        //   return res.status(400).json({ 
+        //     error: 'AI Verification failed: Image does not appear to be valid waste.',
+        //     ai_confidence: aiResult.confidence 
+        //   });
+        // }
+      }
+      // ────────────────────────────────────────────────────────────────────────
 
       await client.query(
         `UPDATE public.bins
@@ -263,6 +301,14 @@ router.post(
         });
       }
 
+      // ── NEW: TRIGGER BACKGROUND ROUTING OPTIMIZATION ──────────────────────
+      const routingController = require('../controllers/route.controller');
+      // We do NOT 'await' this. It runs in the background so the user gets a fast response!
+      routingController.handleRouteGeneration().catch(err => {
+        console.error("Background OR-Tools routing recalculation failed:", err);
+      });
+      // ────────────────────────────────────────────────────────────────────────
+
       return res.status(200).json({
         message:        'Bin reported successfully. You will earn ECO when the collector picks it up.',
         scan_log_id:    scanResult.rows[0].id,
@@ -273,7 +319,7 @@ router.post(
           street:    bin.street,
           barangay:  bin.barangay,
           tier:      bin.tier_name,
-          eco_reward: bin.eco_reward,  // tells resident how much they'll earn on collection
+          eco_reward: bin.eco_reward,
         },
       });
     } catch (err) {
@@ -345,7 +391,7 @@ router.post(
       const bin = binResult.rows[0];
 
       // State machine checks
-      if (bin.status === 'EMPTY' || bin.status === 'PARTIAL') {
+      if (bin.status === 'EMPTY' || bin.status === 'NOT_FULL') {
         await client.query('ROLLBACK');
         return res.status(409).json({
           error:  'No resident has reported this bin yet.',
@@ -438,7 +484,6 @@ router.post(
         );
 
         // Notify connected clients
-        const io = require('../index')?.app?.get?.('io');
         if (req.app.get('io')) {
           req.app.get('io').emit('bin:status_changed', {
             bin_id:    binId,

@@ -10,27 +10,17 @@
 const express = require('express');
 const router  = express.Router();
 const pool    = require('../db');
-const jwt     = require('jsonwebtoken');
-
-function authenticate(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token  = header.startsWith('Bearer ') ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'Authentication required.' });
-  try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token.' });
-  }
-}
+const { authenticate } = require('../middleware/auth');
 
 // GET /api/tiers
 router.get('/', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, name, capacity_liters, eco_reward FROM public.tiers ORDER BY name ASC'
+      `SELECT id, name, bin_category, capacity_liters, typical_use, eco_reward
+       FROM public.tiers
+       ORDER BY capacity_liters ASC NULLS LAST`
     );
-    return res.status(200).json(result.rows);  // return array directly
+    return res.status(200).json(result.rows);
   } catch (err) {
     console.error('Get tiers error:', err);
     return res.status(500).json({ error: 'Internal server error.' });

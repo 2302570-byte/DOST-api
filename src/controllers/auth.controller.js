@@ -2,6 +2,61 @@ const bcrypt = require('bcrypt');
 const jwt    = require('jsonwebtoken');
 const pool   = require('../db');
 
+// ─── POST /api/auth/register ──────────────────────────────────────────────────
+async function register(req, res) {
+  const { name, email, phone, barangay, password, role } = req.body;
+
+  // 1. Validation
+  if (!name || !email || !phone || !barangay || !password || !role) {
+    return res.status(400).json({ error: 'All fields are required.' });
+  }
+
+  // Only allow self-registration for resident and mrf_buyer roles
+  const ALLOWED_ROLES = ['resident', 'mrf_buyer'];
+  if (!ALLOWED_ROLES.includes(role)) {
+    return res.status(400).json({ error: 'Invalid role for self-registration.' });
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  try {
+    // 2. Check email not already taken
+    const existing = await pool.query(
+      'SELECT id FROM users WHERE email = $1 LIMIT 1',
+      [normalizedEmail]
+    );
+    if (existing.rowCount > 0) {
+      return res.status(409).json({ error: 'An account with this email already exists.' });
+    }
+
+    // 3. Hash password
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // 4. Insert user
+    const result = await pool.query(
+      `INSERT INTO users (name, email, phone, barangay, password_hash, role, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, true)
+       RETURNING id, name, email, role, barangay, phone`,
+      [name.trim(), normalizedEmail, phone.trim(), barangay, passwordHash, role]
+    );
+
+    const user = result.rows[0];
+
+    // 5. Sign JWT so the user is logged in immediately after registration
+    const token = jwt.sign(
+      { id: user.id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    );
+
+    return res.status(201).json({ token, user });
+
+  } catch (err) {
+    console.error('Register error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
 // ─── POST /api/auth/login ─────────────────────────────────────────────────────
 async function login(req, res) {
   const { email, password } = req.body;
@@ -65,4 +120,4 @@ async function login(req, res) {
   }
 }
 
-module.exports = { login };
+module.exports = { register, login };

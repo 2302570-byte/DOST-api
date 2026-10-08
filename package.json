@@ -4,9 +4,10 @@
   "description": "BE-SMART REST API — Batangas City Waste Management Platform",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "db:migrate": "node src/db/migrate.js"
+    "start":       "node src/index.js",
+    "dev":         "nodemon src/index.js",
+    "db:migrate":  "node src/db/migrate.js",
+    "db:seed":     "node src/db/seed.js"
   },
   "dependencies": {
     "bcrypt": "5.1.1",
