@@ -1,11 +1,15 @@
-// ─── ECO tables migration ─────────────────────────────────────────────────────
-// Runs eco-schema.sql against the database.
+// =============================================================================
+// migrate.js — BE-SMART Database Setup
 //
-// Setup order for a FRESH database:
-//   1. Run users.sql manually in pgAdmin (creates users table, enum, seed users)
-//   2. Run this script: node src/db/migrate.js  (creates ECO tables + seed rewards)
+// Runs schema.sql against the configured database.
+// Safe to run on a fresh database or re-run on an existing one
+// (all statements use CREATE IF NOT EXISTS).
 //
-// On an existing database that already has the users table, just run this script.
+// Usage:
+//   node src/db/migrate.js
+//
+// Requires DATABASE_URL in .env
+// =============================================================================
 
 require('dotenv').config();
 const fs   = require('fs');
@@ -13,13 +17,14 @@ const path = require('path');
 const pool = require('../db');
 
 async function migrate() {
-  const sql = fs.readFileSync(path.join(__dirname, 'eco-schema.sql'), 'utf8');
+  const sqlPath = path.join(__dirname, 'schema.sql');
+  const sql     = fs.readFileSync(sqlPath, 'utf8');
+
   try {
-    await pool.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
     await pool.query(sql);
-    console.log('ECO schema migration applied successfully.');
+    console.log('✓ Schema applied successfully (schema.sql).');
   } catch (err) {
-    console.error('Migration failed:', err.message);
+    console.error('✗ Migration failed:', err.message);
     process.exitCode = 1;
   } finally {
     await pool.end();
