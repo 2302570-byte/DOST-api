@@ -1,9 +1,25 @@
--- BE-SMART Full Database Schema - dostbesmart_db
--- Run this to set up a fresh database from scratch
+-- =============================================================================
+-- BE-SMART Full Database Schema
+-- dostbesmart_db
+--
+-- Run this once on a fresh database to create all tables from scratch.
+-- Safe to re-run: all statements use CREATE IF NOT EXISTS / DO $$ guards.
+--
+-- Setup order:
+--   1. psql -d dostbesmart_db -f schema.sql
+--   2. (Optional) run seed_users.sql to insert test accounts
+-- =============================================================================
 
--- Custom types
+-- ---------------------------------------------------------------------------
+-- Extensions
+-- ---------------------------------------------------------------------------
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ---------------------------------------------------------------------------
+-- Enums
+-- ---------------------------------------------------------------------------
 DO $$ BEGIN
-  CREATE TYPE user_role AS ENUM (
+  CREATE TYPE public.user_role AS ENUM (
     'super_admin',
     'cluster_admin',
     'collector_admin',
@@ -16,80 +32,9 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
--- users
-CREATE TABLE IF NOT EXISTS public.users (
-  id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
-  name          VARCHAR(100)  NOT NULL,
-  email         VARCHAR(150)  NOT NULL UNIQUE,
-  phone         VARCHAR(20),
-  password_hash TEXT          NOT NULL,
-  role          user_role     NOT NULL,
-  barangay      VARCHAR(150),
-  address       TEXT,
-  is_active     BOOLEAN       NOT NULL DEFAULT true,
-  eco_points    INTEGER       NOT NULL DEFAULT 0,
-  created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-  updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
-);
-
--- tiers
-CREATE TABLE IF NOT EXISTS public.tiers (
-  id               UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  name             VARCHAR(50)  NOT NULL,
-  capacity_liters  INTEGER,
-  created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
--- Default tier seeds
-INSERT INTO public.tiers (name, capacity_liters) SELECT 'Tier 1', 660  WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 1');
-INSERT INTO public.tiers (name, capacity_liters) SELECT 'Tier 2', 1100 WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 2');
-INSERT INTO public.tiers (name, capacity_liters) SELECT 'Tier 3', NULL WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 3');
-
-
-CREATE TABLE IF NOT EXISTS public.bins (
-  id                     UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-  name                   VARCHAR(150) NOT NULL,
-  street                 VARCHAR(200),
-  barangay               VARCHAR(150),
-  barangay_code          VARCHAR(50),
-  cluster_id             VARCHAR(50),
-  tier_id                UUID REFERENCES public.tiers(id) ON DELETE SET NULL,
-  sticker_dimensions     VARCHAR(30)  DEFAULT '15cm x 15cm',
-  latitude               NUMERIC(10, 7),
-  longitude              NUMERIC(10, 7),
-  status                 VARCHAR(20)  NOT NULL DEFAULT 'EMPTY',
-  fill_photo_url         TEXT,
-  qr_payload             TEXT,
-  created_by             UUID REFERENCES public.users(id) ON DELETE SET NULL,
-  created_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  CONSTRAINT bins_status_check
-    CHECK (status IN ('EMPTY', 'PARTIAL', 'FULL', 'COLLECTED', 'LOCKED', 'MISSED'))
-);
-
--- scan_logs
-CREATE TABLE IF NOT EXISTS public.scan_logs (
-  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  bin_id      UUID        NOT NULL REFERENCES public.bins(id) ON DELETE CASCADE,
-  reporter_id UUID        NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
-  photo_url   TEXT,
-  latitude    NUMERIC(10, 7),
-  longitude   NUMERIC(10, 7),
-  notes       TEXT,
-  scanned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Indexes
-CREATE INDEX IF NOT EXISTS idx_users_email        ON public.users(email);
-CREATE INDEX IF NOT EXISTS idx_users_role         ON public.users(role);
-CREATE INDEX IF NOT EXISTS idx_bins_barangay      ON public.bins(barangay);
-CREATE INDEX IF NOT EXISTS idx_bins_status        ON public.bins(status);
-CREATE INDEX IF NOT EXISTS idx_bins_tier_id       ON public.bins(tier_id);
-CREATE INDEX IF NOT EXISTS idx_scan_logs_bin_id   ON public.scan_logs(bin_id);
-CREATE INDEX IF NOT EXISTS idx_scan_logs_reporter ON public.scan_logs(reporter_id);
-
--- Auto updated_at trigger
+-- ---------------------------------------------------------------------------
+-- Trigger helper: auto-update updated_at on every row update
+-- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.set_updated_at()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
@@ -98,17 +43,250 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_tiers_updated_at ON public.tiers;
-CREATE TRIGGER trg_tiers_updated_at
-  BEFORE UPDATE ON public.tiers
-  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+-- =============================================================================
+-- CORE TABLES
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- users
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.users (
+  id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+  name          VARCHAR(100)  NOT NULL,
+  email         VARCHAR(150)  NOT NULL UNIQUE,
+  phone         VARCHAR(20),
+  password_hash TEXT          NOT NULL,
+  role          public.user_role NOT NULL,
+  barangay      VARCHAR(150),
+  address       TEXT,
+  is_active     BOOLEAN       NOT NULL DEFAULT true,
+  eco_points    INTEGER       NOT NULL DEFAULT 0,
+  created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON public.users(email);
+CREATE INDEX IF NOT EXISTS idx_users_role  ON public.users(role);
 
 DROP TRIGGER IF EXISTS trg_users_updated_at ON public.users;
 CREATE TRIGGER trg_users_updated_at
   BEFORE UPDATE ON public.users
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
+-- ---------------------------------------------------------------------------
+-- tiers
+-- Bin size categories with their ECO reward amounts.
+--   Tier 1 — 660L  — 20 ECO
+--   Tier 2 — 1100L — 35 ECO
+--   Tier 3 — large — 50 ECO
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.tiers (
+  id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name             VARCHAR(50) NOT NULL,
+  capacity_liters  INTEGER,
+  eco_reward       INTEGER     NOT NULL DEFAULT 0,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO public.tiers (name, capacity_liters, eco_reward)
+  SELECT 'Tier 1', 660,  20 WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 1');
+INSERT INTO public.tiers (name, capacity_liters, eco_reward)
+  SELECT 'Tier 2', 1100, 35 WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 2');
+INSERT INTO public.tiers (name, capacity_liters, eco_reward)
+  SELECT 'Tier 3', NULL, 50 WHERE NOT EXISTS (SELECT 1 FROM public.tiers WHERE name = 'Tier 3');
+
+DROP TRIGGER IF EXISTS trg_tiers_updated_at ON public.tiers;
+CREATE TRIGGER trg_tiers_updated_at
+  BEFORE UPDATE ON public.tiers
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- bins
+-- Physical smart bins. Status follows: EMPTY → FULL → COLLECTED.
+-- qr_payload stores the HMAC-SHA256 signed JSON generated by the API.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.bins (
+  id                 UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  name               VARCHAR(150) NOT NULL,
+  street             VARCHAR(200),
+  barangay           VARCHAR(150),
+  barangay_code      VARCHAR(50),
+  cluster_id         VARCHAR(50),
+  tier_id            UUID         REFERENCES public.tiers(id) ON DELETE SET NULL,
+  sticker_dimensions VARCHAR(30)  DEFAULT '15cm x 15cm',
+  latitude           NUMERIC(10, 7),
+  longitude          NUMERIC(10, 7),
+  status             VARCHAR(20)  NOT NULL DEFAULT 'EMPTY',
+  fill_photo_url     TEXT,
+  qr_payload         TEXT,
+  created_by         UUID         REFERENCES public.users(id) ON DELETE SET NULL,
+  created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  CONSTRAINT bins_status_check
+    CHECK (status IN ('EMPTY', 'PARTIAL', 'FULL', 'COLLECTED', 'LOCKED', 'MISSED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bins_barangay ON public.bins(barangay);
+CREATE INDEX IF NOT EXISTS idx_bins_status   ON public.bins(status);
+CREATE INDEX IF NOT EXISTS idx_bins_tier_id  ON public.bins(tier_id);
+
 DROP TRIGGER IF EXISTS trg_bins_updated_at ON public.bins;
 CREATE TRIGGER trg_bins_updated_at
   BEFORE UPDATE ON public.bins
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- scan_logs
+-- Records each resident bin scan (Step 1) and collector confirmation (Step 2).
+-- ECO columns are populated when the collector confirms collection.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.scan_logs (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  bin_id         UUID        NOT NULL REFERENCES public.bins(id) ON DELETE CASCADE,
+  reporter_id    UUID        NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  photo_url      TEXT,
+  latitude       NUMERIC(10, 7),
+  longitude      NUMERIC(10, 7),
+  notes          TEXT,
+  scanned_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Filled in by the collector on collection-confirm:
+  collected_by   UUID        REFERENCES public.users(id) ON DELETE SET NULL,
+  collected_at   TIMESTAMPTZ,
+  eco_awarded    INTEGER,
+  eco_tx_hash    TEXT,
+  eco_tx_status  TEXT        DEFAULT 'pending'
+    CHECK (eco_tx_status IN ('pending', 'confirmed', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_logs_bin_id       ON public.scan_logs(bin_id);
+CREATE INDEX IF NOT EXISTS idx_scan_logs_reporter     ON public.scan_logs(reporter_id);
+CREATE INDEX IF NOT EXISTS idx_scan_logs_collected_by ON public.scan_logs(collected_by);
+CREATE INDEX IF NOT EXISTS idx_scan_logs_eco_status   ON public.scan_logs(eco_tx_status);
+
+-- =============================================================================
+-- ECO TOKEN TABLES
+-- The blockchain contract (Hedera PointsLedger) is the source of truth for
+-- balances. These tables are the fast-read mirror and application logic layer.
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- waste_types
+-- Categories of waste accepted at MRFs, with ECO awarded per kg.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.waste_types (
+  id          UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+  label       VARCHAR(100)  NOT NULL UNIQUE,
+  eco_per_kg  NUMERIC(10,2) NOT NULL CHECK (eco_per_kg > 0),
+  icon        VARCHAR(100),
+  is_active   BOOLEAN       NOT NULL DEFAULT true,
+  created_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO public.waste_types (label, eco_per_kg, icon) VALUES
+  ('Recyclables',   20, 'refresh-circle-outline'),
+  ('Biodegradable', 18, 'leaf-outline'),
+  ('Special Waste', 50, 'warning-outline')
+ON CONFLICT (label) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- waste_submissions
+-- Each waste drop-off by a resident at an MRF, recorded by an MRF worker.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.waste_submissions (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  resident_id    UUID        NOT NULL REFERENCES public.users(id),
+  mrf_worker_id  UUID        NOT NULL REFERENCES public.users(id),
+  waste_type_id  UUID        NOT NULL REFERENCES public.waste_types(id),
+  weight_kg      NUMERIC(8,2) NOT NULL CHECK (weight_kg > 0),
+  eco_awarded    INTEGER     NOT NULL CHECK (eco_awarded > 0),
+  tx_hash        TEXT,
+  tx_status      TEXT        NOT NULL DEFAULT 'pending'
+    CHECK (tx_status IN ('pending', 'confirmed', 'failed')),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_waste_submissions_resident ON public.waste_submissions(resident_id);
+CREATE INDEX IF NOT EXISTS idx_waste_submissions_worker   ON public.waste_submissions(mrf_worker_id);
+CREATE INDEX IF NOT EXISTS idx_waste_submissions_status   ON public.waste_submissions(tx_status);
+
+-- ---------------------------------------------------------------------------
+-- eco_rewards
+-- Rewards catalog. Partners: Mercury Drug, Jollibee, SM Malls, Meralco, etc.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.eco_rewards (
+  id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  name         VARCHAR(200) NOT NULL,
+  description  TEXT,
+  category     VARCHAR(100),
+  partner      VARCHAR(100),
+  eco_cost     INTEGER      NOT NULL CHECK (eco_cost > 0),
+  stock        INTEGER,
+  featured     BOOLEAN      NOT NULL DEFAULT false,
+  is_active    BOOLEAN      NOT NULL DEFAULT true,
+  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO public.eco_rewards (name, category, partner, eco_cost, stock, featured, is_active) VALUES
+  ('Mercury Drug ₱100 Voucher', 'Services',  'Mercury Drug',       400, 5,  true,  true),
+  ('Jollibee ₱50 GC',          'Food',      'Jollibee',           200, 12, false, true),
+  ('SM Malls ₱100 GC',         'Shopping',  'SM Malls',           350, 8,  false, true),
+  ('Meralco Bill Discount',    'Utilities', 'Meralco',            500, 3,  false, true),
+  ('Chowking ₱50 GC',          'Food',      'Chowking',           180, 20, false, true),
+  ('National Bookstore ₱75 GC','Shopping',  'National Bookstore', 250, 0,  false, false)
+ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- eco_redemptions
+-- Reward redemptions by residents. tx_hash links to the Hedera burn tx.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.eco_redemptions (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  resident_id UUID        NOT NULL REFERENCES public.users(id),
+  reward_id   UUID        NOT NULL REFERENCES public.eco_rewards(id),
+  eco_cost    INTEGER     NOT NULL,
+  tx_hash     TEXT,
+  tx_status   TEXT        NOT NULL DEFAULT 'pending'
+    CHECK (tx_status IN ('pending', 'confirmed', 'failed')),
+  redeemed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_eco_redemptions_resident ON public.eco_redemptions(resident_id);
+
+-- ---------------------------------------------------------------------------
+-- user_eco_balances
+-- Fast-read cached ECO balance per user.
+-- Kept in sync after each confirmed blockchain tx; Hedera is source of truth.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.user_eco_balances (
+  user_id    UUID    PRIMARY KEY REFERENCES public.users(id),
+  balance    BIGINT  NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =============================================================================
+-- COLLECTION OPERATIONS TABLES
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- collector_reports
+-- Route incident reports submitted by collectors via the mobile app.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.collector_reports (
+  id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  collector_id     UUID        NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  issue_type       TEXT        NOT NULL
+    CHECK (issue_type IN ('Vehicle Problem', 'Traffic Jam', 'Road Closure', 'Weather Condition', 'Other')),
+  notes            TEXT,
+  stops_completed  INTEGER     NOT NULL DEFAULT 0,
+  stops_total      INTEGER     NOT NULL DEFAULT 0,
+  status           TEXT        NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'resolved')),
+  reported_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at      TIMESTAMPTZ,
+  resolved_by      UUID        REFERENCES public.users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_collector_reports_collector ON public.collector_reports(collector_id);
+CREATE INDEX IF NOT EXISTS idx_collector_reports_status    ON public.collector_reports(status);
+CREATE INDEX IF NOT EXISTS idx_collector_reports_reported  ON public.collector_reports(reported_at DESC);
