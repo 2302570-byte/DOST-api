@@ -266,6 +266,55 @@ CREATE TABLE IF NOT EXISTS public.user_eco_balances (
 );
 
 -- =============================================================================
+-- COLLECTOR UNIT TABLES
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- collector_units
+-- Physical garbage trucks / collector units managed by the Collector Admin.
+-- Status: idle (default), en_route, at_depot
+-- ---------------------------------------------------------------------------
+DO $$ BEGIN
+  CREATE TYPE public.collector_unit_status AS ENUM ('idle', 'en_route', 'at_depot');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.collector_units (
+  id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  name         VARCHAR(100) NOT NULL,
+  plate_number VARCHAR(30)  NOT NULL UNIQUE,
+  status       public.collector_unit_status NOT NULL DEFAULT 'idle',
+  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_collector_units_status ON public.collector_units(status);
+
+DROP TRIGGER IF EXISTS trg_collector_units_updated_at ON public.collector_units;
+CREATE TRIGGER trg_collector_units_updated_at
+  BEFORE UPDATE ON public.collector_units
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- collector_unit_members
+-- Junction table linking collectors (users with role='collector') to units.
+-- A collector can belong to at most one unit at a time (enforced via UNIQUE
+-- on collector_id — not on unit_id, which can have many collectors).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.collector_unit_members (
+  unit_id      UUID NOT NULL REFERENCES public.collector_units(id) ON DELETE CASCADE,
+  collector_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  assigned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (unit_id, collector_id)
+);
+
+-- One-unit-per-collector constraint: a collector cannot be in two units
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cum_one_unit_per_collector
+  ON public.collector_unit_members(collector_id);
+
+CREATE INDEX IF NOT EXISTS idx_cum_unit_id ON public.collector_unit_members(unit_id);
+
+-- =============================================================================
 -- COLLECTION OPERATIONS TABLES
 -- =============================================================================
 

@@ -10,6 +10,8 @@ const binRoutes             = require('./routes/binScanRoutes');
 const tierRoutes            = require('./routes/tiersRoutes');
 const collectorReportRoutes = require('./routes/collectorReportRoutes');
 const usersRoutes           = require('./routes/users.routes');
+const collectorUnitsRoutes  = require('./routes/collectorUnits.routes');
+const collectorsRoutes      = require('./routes/collectors.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -44,6 +46,8 @@ app.use('/api/bins',               binRoutes);
 app.use('/api/tiers',              tierRoutes);
 app.use('/api/collector-reports',  collectorReportRoutes);
 app.use('/api/users/mrf-workers',  usersRoutes);
+app.use('/api/collector-units',    collectorUnitsRoutes);
+app.use('/api/collectors',         collectorsRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
