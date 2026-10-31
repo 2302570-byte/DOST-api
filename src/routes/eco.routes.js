@@ -74,10 +74,38 @@ router.get(
 
 // GET  /api/eco/rewards
 // List active rewards (all authenticated users can browse)
+// Pass ?all=true to include inactive rewards (punong_barangay admin view)
 router.get(
   '/rewards',
   authenticate,
   eco.getRewards
+);
+
+// POST /api/eco/rewards
+// Punong barangay creates a new reward
+router.post(
+  '/rewards',
+  authenticate,
+  requireRole('punong_barangay'),
+  eco.createReward
+);
+
+// PUT /api/eco/rewards/:id
+// Punong barangay updates a reward
+router.put(
+  '/rewards/:id',
+  authenticate,
+  requireRole('punong_barangay'),
+  eco.updateReward
+);
+
+// DELETE /api/eco/rewards/:id
+// Punong barangay soft-deletes a reward (sets is_active = false)
+router.delete(
+  '/rewards/:id',
+  authenticate,
+  requireRole('punong_barangay'),
+  eco.deleteReward
 );
 
 // POST /api/eco/rewards/:id/redeem

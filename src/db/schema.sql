@@ -225,8 +225,14 @@ CREATE TABLE IF NOT EXISTS public.eco_rewards (
   stock        INTEGER,
   featured     BOOLEAN      NOT NULL DEFAULT false,
   is_active    BOOLEAN      NOT NULL DEFAULT true,
-  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+DROP TRIGGER IF EXISTS trg_eco_rewards_updated_at ON public.eco_rewards;
+CREATE TRIGGER trg_eco_rewards_updated_at
+  BEFORE UPDATE ON public.eco_rewards
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 INSERT INTO public.eco_rewards (name, category, partner, eco_cost, stock, featured, is_active) VALUES
   ('Mercury Drug ₱100 Voucher', 'Services',  'Mercury Drug',       400, 5,  true,  true),

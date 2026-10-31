@@ -279,13 +279,15 @@ async function getTransactions(req, res) {
 }
 
 // ─── GET /api/eco/rewards ─────────────────────────────────────────────────────
-// List active rewards available for redemption.
+// List rewards. By default returns only active rewards (for residents/buyers).
+// Pass ?all=true to include inactive rewards (admin view for punong_barangay).
 async function getRewards(req, res) {
   try {
+    const showAll = req.query.all === 'true';
     const { rows } = await pool.query(
-      `SELECT id, name, description, category, partner, eco_cost, stock, featured
+      `SELECT id, name, description, category, partner, eco_cost, stock, featured, is_active
        FROM eco_rewards
-       WHERE is_active = true
+       ${showAll ? '' : 'WHERE is_active = true'}
        ORDER BY featured DESC, eco_cost ASC`
     );
     res.json(rows);
@@ -394,6 +396,120 @@ async function redeemReward(req, res) {
   }
 }
 
+// ─── POST /api/eco/rewards ────────────────────────────────────────────────────
+// Punong barangay creates a new reward in the catalog.
+async function createReward(req, res) {
+  const { name, description, category, partner, ecoCost, stock, featured, isActive } = req.body;
+
+  if (!name || !ecoCost) {
+    return res.status(400).json({ error: 'name and ecoCost are required.' });
+  }
+  if (isNaN(Number(ecoCost)) || Number(ecoCost) <= 0) {
+    return res.status(400).json({ error: 'ecoCost must be a positive integer.' });
+  }
+  if (stock !== undefined && stock !== null && (isNaN(Number(stock)) || Number(stock) < 0)) {
+    return res.status(400).json({ error: 'stock must be a non-negative integer.' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO eco_rewards (name, description, category, partner, eco_cost, stock, featured, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, name, description, category, partner, eco_cost, stock, featured, is_active, created_at`,
+      [
+        name.trim(),
+        description?.trim() ?? null,
+        category?.trim()    ?? null,
+        partner?.trim()     ?? null,
+        Number(ecoCost),
+        stock !== undefined && stock !== null ? Number(stock) : null,
+        featured  ?? false,
+        isActive  ?? true,
+      ],
+    );
+    return res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('createReward error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
+// ─── PUT /api/eco/rewards/:id ─────────────────────────────────────────────────
+// Punong barangay updates a reward.
+async function updateReward(req, res) {
+  const { id } = req.params;
+  const { name, description, category, partner, ecoCost, stock, featured, isActive } = req.body;
+
+  if (
+    name === undefined && description === undefined && category === undefined &&
+    partner === undefined && ecoCost === undefined && stock === undefined &&
+    featured === undefined && isActive === undefined
+  ) {
+    return res.status(400).json({ error: 'Provide at least one field to update.' });
+  }
+
+  if (ecoCost !== undefined && (isNaN(Number(ecoCost)) || Number(ecoCost) <= 0)) {
+    return res.status(400).json({ error: 'ecoCost must be a positive integer.' });
+  }
+  if (stock !== undefined && stock !== null && (isNaN(Number(stock)) || Number(stock) < 0)) {
+    return res.status(400).json({ error: 'stock must be a non-negative integer.' });
+  }
+
+  try {
+    const existing = await pool.query('SELECT id FROM eco_rewards WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Reward not found.' });
+    }
+
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    if (name        !== undefined) { fields.push(`name = $${idx++}`);        values.push(name.trim()); }
+    if (description !== undefined) { fields.push(`description = $${idx++}`); values.push(description?.trim() ?? null); }
+    if (category    !== undefined) { fields.push(`category = $${idx++}`);    values.push(category?.trim() ?? null); }
+    if (partner     !== undefined) { fields.push(`partner = $${idx++}`);     values.push(partner?.trim() ?? null); }
+    if (ecoCost     !== undefined) { fields.push(`eco_cost = $${idx++}`);    values.push(Number(ecoCost)); }
+    if (stock       !== undefined) { fields.push(`stock = $${idx++}`);       values.push(stock !== null ? Number(stock) : null); }
+    if (featured    !== undefined) { fields.push(`featured = $${idx++}`);    values.push(featured); }
+    if (isActive    !== undefined) { fields.push(`is_active = $${idx++}`);   values.push(isActive); }
+
+    values.push(id);
+
+    const { rows } = await pool.query(
+      `UPDATE eco_rewards SET ${fields.join(', ')}
+       WHERE id = $${idx}
+       RETURNING id, name, description, category, partner, eco_cost, stock, featured, is_active, created_at`,
+      values,
+    );
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error('updateReward error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
+// ─── DELETE /api/eco/rewards/:id ──────────────────────────────────────────────
+// Soft-deletes a reward (sets is_active = false) to preserve redemption history.
+async function deleteReward(req, res) {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE eco_rewards SET is_active = false
+       WHERE id = $1
+       RETURNING id`,
+      [id],
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Reward not found.' });
+    }
+    return res.json({ message: 'Reward deactivated.' });
+  } catch (err) {
+    console.error('deleteReward error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
 module.exports = {
   getWasteTypes,
   issueEco,
@@ -403,4 +519,7 @@ module.exports = {
   getTransactions,
   getRewards,
   redeemReward,
+  createReward,
+  updateReward,
+  deleteReward,
 };
