@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS public.users (
   address       TEXT,
   is_active     BOOLEAN       NOT NULL DEFAULT true,
   eco_points    INTEGER       NOT NULL DEFAULT 0,
+  last_login    TIMESTAMPTZ,
   created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );

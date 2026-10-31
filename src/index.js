@@ -9,6 +9,7 @@ const ecoRoutes             = require('./routes/eco.routes');
 const binRoutes             = require('./routes/binScanRoutes');
 const tierRoutes            = require('./routes/tiersRoutes');
 const collectorReportRoutes = require('./routes/collectorReportRoutes');
+const usersRoutes           = require('./routes/users.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -42,6 +43,7 @@ app.use('/api/eco',                ecoRoutes);
 app.use('/api/bins',               binRoutes);
 app.use('/api/tiers',              tierRoutes);
 app.use('/api/collector-reports',  collectorReportRoutes);
+app.use('/api/users/mrf-workers',  usersRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {

@@ -131,7 +131,13 @@ async function login(req, res) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    // 6. Sign JWT
+    // 6. Stamp last_login
+    await pool.query(
+      'UPDATE users SET last_login = NOW() WHERE id = $1',
+      [user.id]
+    );
+
+    // 7. Sign JWT
     const token = jwt.sign(
       {
         id:   user.id,
