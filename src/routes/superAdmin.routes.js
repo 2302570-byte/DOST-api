@@ -1071,7 +1071,7 @@ router.get('/notifications', ...isSA, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, type, title, body, target, priority, sent_at AS "sentAt", read
-       FROM public.notifications
+       FROM public.announcements
        ORDER BY sent_at DESC
        LIMIT 100`
     );
@@ -1087,7 +1087,7 @@ router.post('/notifications', ...isSA, async (req, res) => {
   }
   try {
     const { rows } = await pool.query(
-      `INSERT INTO public.notifications (type, title, body, target, priority, sent_by)
+      `INSERT INTO public.announcements (type, title, body, target, priority, sent_by)
        VALUES ($1,$2,$3,$4,$5,$6)
        RETURNING id, type, title, body, target, priority, sent_at AS "sentAt", read`,
       [type, title.trim(), body.trim(), target, priority, req.user.id]

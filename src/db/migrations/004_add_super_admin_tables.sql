@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Migration: Super Admin Tables
--- Adds: barangays, collection_routes, notifications
+-- Adds: barangays, collection_routes, announcements
 -- Run: psql "<DATABASE_URL>" -f src/db/migrations/add_super_admin_tables.sql
 -- =============================================================================
 
@@ -53,10 +53,12 @@ CREATE INDEX IF NOT EXISTS idx_collection_routes_date   ON public.collection_rou
 CREATE INDEX IF NOT EXISTS idx_collection_routes_status ON public.collection_routes(status);
 
 -- ---------------------------------------------------------------------------
--- notifications
--- Announcements broadcast by Super Admin to all portal users.
+-- announcements
+-- Broadcast messages sent by Super Admin to portal users.
+-- Kept separate from the per-user `notifications` table (which tracks
+-- individual read state via user_id) to avoid a name collision.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS public.notifications (
+CREATE TABLE IF NOT EXISTS public.announcements (
   id        UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   type      VARCHAR(30)  NOT NULL DEFAULT 'announcement'
     CHECK (type IN ('announcement', 'schedule', 'complete', 'report', 'task')),
@@ -70,7 +72,7 @@ CREATE TABLE IF NOT EXISTS public.notifications (
   read      BOOLEAN      NOT NULL DEFAULT false
 );
 
-CREATE INDEX IF NOT EXISTS idx_notifications_sent_at  ON public.notifications(sent_at DESC);
-CREATE INDEX IF NOT EXISTS idx_notifications_priority ON public.notifications(priority);
+CREATE INDEX IF NOT EXISTS idx_announcements_sent_at  ON public.announcements(sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_announcements_priority ON public.announcements(priority);
 
-SELECT 'Migration complete: barangays, collection_routes, notifications tables created.' AS result;
+SELECT 'Migration complete: barangays, collection_routes, announcements tables created.' AS result;

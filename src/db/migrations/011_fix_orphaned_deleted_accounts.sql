@@ -31,7 +31,8 @@ SELECT
   u.deleted_at
 FROM public.users u
 LEFT JOIN public.barangays b ON b.name = u.barangay AND b.deleted_at IS NULL
-LEFT JOIN public.clusters c ON c.id = b.cluster_id
+LEFT JOIN public.cluster_barangays cb ON cb.barangay_id = b.id
+LEFT JOIN public.clusters c ON c.id = cb.cluster_id
 WHERE u.role = 'punong_barangay'
   AND u.deleted_at IS NOT NULL
   AND u.barangay IS NOT NULL
