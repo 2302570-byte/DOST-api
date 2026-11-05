@@ -249,6 +249,11 @@ INSERT INTO public.eco_rewards (name, category, partner, eco_cost, stock, featur
   ('National Bookstore ₱75 GC','Shopping',  'National Bookstore', 250, 0,  false, false)
 ON CONFLICT DO NOTHING;
 
+DROP TRIGGER IF EXISTS trg_eco_rewards_updated_at ON public.eco_rewards;
+CREATE TRIGGER trg_eco_rewards_updated_at
+  BEFORE UPDATE ON public.eco_rewards
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
 -- ---------------------------------------------------------------------------
 -- eco_redemptions
 -- Two-step reward redemptions by residents.
@@ -264,7 +269,7 @@ ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS public.eco_redemptions (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   resident_id UUID        NOT NULL REFERENCES public.users(id),
-  reward_id   UUID        NOT NULL REFERENCES public.eco_rewards(id),
+  reward_id   UUID        NOT NULL REFERENCES public.eco_rewards(id) ON DELETE CASCADE,
   eco_cost    INTEGER     NOT NULL,
   tx_hash     TEXT,
   tx_status   TEXT        NOT NULL DEFAULT 'pending'

@@ -15,6 +15,7 @@ const mrfRoutes             = require('./routes/mrf.routes');
 const usersRoutes           = require('./routes/users.routes');
 const collectorUnitsRoutes  = require('./routes/collectorUnits.routes');
 const collectorsRoutes      = require('./routes/collectors.routes');
+const superAdminRoutes      = require('./routes/superAdmin.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -54,6 +55,7 @@ app.use('/api/mrf',                mrfRoutes);
 app.use('/api/users/mrf-workers',  usersRoutes);
 app.use('/api/collector-units',    collectorUnitsRoutes);
 app.use('/api/collectors',         collectorsRoutes);
+app.use('/api/sa',                 superAdminRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
