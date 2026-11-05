@@ -134,7 +134,16 @@ router.post('/bulk-delete', authenticate, async (req, res) => {
     });
   } catch (err) {
     console.error('Bulk delete error:', err);
-    return res.status(500).json({ error: 'Internal server error.' });
+    console.error('Error details:', {
+      message: err.message,
+      code: err.code,
+      detail: err.detail,
+      constraint: err.constraint
+    });
+    return res.status(500).json({ 
+      error: 'Internal server error.',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 
@@ -151,7 +160,16 @@ router.delete('/:id', authenticate, async (req, res) => {
     return res.status(200).json({ message: 'Bin deleted successfully.' });
   } catch (err) {
     console.error('Delete bin error:', err);
-    return res.status(500).json({ error: 'Internal server error.' });
+    console.error('Error details:', {
+      message: err.message,
+      code: err.code,
+      detail: err.detail,
+      constraint: err.constraint
+    });
+    return res.status(500).json({ 
+      error: 'Internal server error.',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 });
 

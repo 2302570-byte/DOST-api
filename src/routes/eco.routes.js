@@ -80,6 +80,33 @@ router.get(
   eco.getRewards
 );
 
+// POST /api/eco/rewards
+// Create a new reward (Punong Barangay only)
+router.post(
+  '/rewards',
+  authenticate,
+  requireRole('punong_barangay'),
+  eco.createReward
+);
+
+// PUT /api/eco/rewards/:id
+// Update an existing reward (Punong Barangay only)
+router.put(
+  '/rewards/:id',
+  authenticate,
+  requireRole('punong_barangay'),
+  eco.updateReward
+);
+
+// DELETE /api/eco/rewards/:id
+// Soft-delete a reward (Punong Barangay only)
+router.delete(
+  '/rewards/:id',
+  authenticate,
+  requireRole('punong_barangay'),
+  eco.deleteReward
+);
+
 // POST /api/eco/rewards/:id/redeem
 // Resident redeems ECO for a reward
 router.post(

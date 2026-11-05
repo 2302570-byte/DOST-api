@@ -225,7 +225,8 @@ CREATE TABLE IF NOT EXISTS public.eco_rewards (
   stock        INTEGER,
   featured     BOOLEAN      NOT NULL DEFAULT false,
   is_active    BOOLEAN      NOT NULL DEFAULT true,
-  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 INSERT INTO public.eco_rewards (name, category, partner, eco_cost, stock, featured, is_active) VALUES
@@ -237,14 +238,20 @@ INSERT INTO public.eco_rewards (name, category, partner, eco_cost, stock, featur
   ('National Bookstore ₱75 GC','Shopping',  'National Bookstore', 250, 0,  false, false)
 ON CONFLICT DO NOTHING;
 
+DROP TRIGGER IF EXISTS trg_eco_rewards_updated_at ON public.eco_rewards;
+CREATE TRIGGER trg_eco_rewards_updated_at
+  BEFORE UPDATE ON public.eco_rewards
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
 -- ---------------------------------------------------------------------------
 -- eco_redemptions
 -- Reward redemptions by residents. tx_hash links to the Hedera burn tx.
+-- When a reward is deleted, all redemption records are also removed (CASCADE).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.eco_redemptions (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   resident_id UUID        NOT NULL REFERENCES public.users(id),
-  reward_id   UUID        NOT NULL REFERENCES public.eco_rewards(id),
+  reward_id   UUID        NOT NULL REFERENCES public.eco_rewards(id) ON DELETE CASCADE,
   eco_cost    INTEGER     NOT NULL,
   tx_hash     TEXT,
   tx_status   TEXT        NOT NULL DEFAULT 'pending'

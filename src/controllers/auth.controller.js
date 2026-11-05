@@ -117,7 +117,7 @@ async function login(req, res) {
 
     // 3. User not found
     if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
+      return res.status(401).json({ error: 'Account does not exist.' });
     }
 
     // 4. Account inactive
@@ -166,4 +166,41 @@ async function login(req, res) {
   }
 }
 
-module.exports = { login, register };
+// ─── GET /api/auth/me ─────────────────────────────────────────────────────────
+// Returns fresh user data from database (for when profile/barangay is updated)
+async function me(req, res) {
+  try {
+    // req.user is set by auth middleware
+    const result = await pool.query(
+      'SELECT id, name, email, role, barangay, phone, is_active FROM users WHERE id = $1 LIMIT 1',
+      [req.user.id]
+    );
+
+    const user = result.rows[0];
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ error: 'Account has been deactivated.' });
+    }
+
+    return res.status(200).json({
+      user: {
+        id:       user.id,
+        name:     user.name,
+        email:    user.email,
+        role:     user.role,
+        barangay: user.barangay,
+        phone:    user.phone,
+      },
+    });
+
+  } catch (err) {
+    console.error('Me error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
+module.exports = { login, register, me };

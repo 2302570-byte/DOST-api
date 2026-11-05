@@ -394,6 +394,89 @@ async function redeemReward(req, res) {
   }
 }
 
+// ─── POST /api/eco/rewards ────────────────────────────────────────────────────
+async function createReward(req, res) {
+  const { name, description, category, partner, ecoCost, eco_cost, stock, featured, isActive, is_active } = req.body;
+  const costValue = ecoCost ?? eco_cost;
+  const activeValue = isActive ?? is_active ?? true;
+  
+  if (!name?.trim() || !costValue) {
+    return res.status(400).json({ error: 'name and ecoCost are required.' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO public.eco_rewards (name, description, category, partner, eco_cost, stock, featured, is_active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       RETURNING id, name, description, category, partner, eco_cost, stock, featured, is_active`,
+      [name.trim(), description ?? null, category ?? null, partner ?? null,
+       Number(costValue), stock ?? null, featured ?? false, activeValue]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('createReward error:', err.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
+// ─── PUT /api/eco/rewards/:id ─────────────────────────────────────────────────
+async function updateReward(req, res) {
+  const { name, description, category, partner, ecoCost, eco_cost, stock, featured, isActive, is_active } = req.body;
+  const costValue = ecoCost ?? eco_cost;
+  const activeValue = isActive ?? is_active;
+  
+  try {
+    const { rows } = await pool.query(
+      `UPDATE public.eco_rewards
+       SET name        = COALESCE($1, name),
+           description = COALESCE($2, description),
+           category    = COALESCE($3, category),
+           partner     = COALESCE($4, partner),
+           eco_cost    = COALESCE($5, eco_cost),
+           stock       = COALESCE($6, stock),
+           featured    = COALESCE($7, featured),
+           is_active   = COALESCE($8, is_active)
+       WHERE id = $9
+       RETURNING id, name, description, category, partner, eco_cost, stock, featured, is_active`,
+      [name?.trim() ?? null, description ?? null, category ?? null, partner ?? null,
+       costValue != null ? Number(costValue) : null,
+       stock    != null ? Number(stock)    : null,
+       featured ?? null, activeValue ?? null, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Reward not found.' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('updateReward error:', err.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
+// ─── DELETE /api/eco/rewards/:id ──────────────────────────────────────────────
+async function deleteReward(req, res) {
+  try {
+    const result = await pool.query(
+      'DELETE FROM public.eco_rewards WHERE id = $1 RETURNING id', [req.params.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Reward not found.' });
+    res.json({ message: 'Reward deleted.' });
+  } catch (err) {
+    console.error('deleteReward error:', err.message);
+    console.error('Error code:', err.code);
+    console.error('Error detail:', err.detail);
+    
+    // Check if it's a foreign key constraint error
+    if (err.code === '23503') {
+      return res.status(409).json({ 
+        error: 'Cannot delete reward. It has been redeemed by residents. Please deactivate it instead of deleting.' 
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'Internal server error.',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  }
+}
+
 module.exports = {
   getWasteTypes,
   issueEco,
@@ -403,4 +486,7 @@ module.exports = {
   getTransactions,
   getRewards,
   redeemReward,
+  createReward,
+  updateReward,
+  deleteReward,
 };
