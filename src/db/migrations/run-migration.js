@@ -1,29 +1,41 @@
-// Run a single migration file against the database.
-// Usage: node src/db/migrations/run-migration.js <filename>
-// Example: node src/db/migrations/run-migration.js 004_bin_scan_rewards.sql
+// =============================================================================
+// run-migration.js — Apply a single migration SQL file to the live database.
+//
+// Usage:
+//   node src/db/migrations/run-migration.js <filename>
+//
+// Example:
+//   node src/db/migrations/run-migration.js 001_scan_logs_volume_and_notifications.sql
+//
+// Requires DATABASE_URL in .env (loaded from project root or DOST-api root).
+// =============================================================================
 
 require('dotenv').config();
 const fs   = require('fs');
 const path = require('path');
-const { Pool } = require('pg');
+const pool = require('../../db'); // DOST-api/src/db.js
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+async function runMigration() {
+  const filename = process.argv[2];
 
-async function run() {
-  const file = process.argv[2];
-  if (!file) {
-    console.error('Usage: node run-migration.js <filename.sql>');
+  if (!filename) {
+    console.error('Usage: node run-migration.js <migration-filename.sql>');
     process.exit(1);
   }
-  const sqlPath = path.join(__dirname, file);
-  if (!fs.existsSync(sqlPath)) {
-    console.error(`File not found: ${sqlPath}`);
+
+  const migrationPath = path.join(__dirname, filename);
+
+  if (!fs.existsSync(migrationPath)) {
+    console.error(`File not found: ${migrationPath}`);
     process.exit(1);
   }
-  const sql = fs.readFileSync(sqlPath, 'utf8');
+
+  const sql = fs.readFileSync(migrationPath, 'utf8');
+
   try {
+    console.log(`Applying migration: ${filename}`);
     await pool.query(sql);
-    console.log(`✓ Migration applied: ${file}`);
+    console.log(`✓ Migration applied successfully: ${filename}`);
   } catch (err) {
     console.error(`✗ Migration failed: ${err.message}`);
     process.exitCode = 1;
@@ -32,4 +44,4 @@ async function run() {
   }
 }
 
-run();
+runMigration();
