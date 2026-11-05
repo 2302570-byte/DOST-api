@@ -52,7 +52,7 @@ async function register(req, res) {
     const result = await pool.query(
       `INSERT INTO users (name, email, phone, barangay, password_hash, role)
        VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, name, email, phone, barangay, role, created_at`,
+       RETURNING id, name, email, phone, barangay, address, role, created_at`,
       [
         name.trim(),
         email.trim().toLowerCase(),
@@ -88,6 +88,7 @@ async function register(req, res) {
         role:     user.role,
         barangay: user.barangay,
         phone:    user.phone,
+        address:  user.address ?? null,
       },
     });
 
@@ -109,7 +110,7 @@ async function login(req, res) {
   try {
     // 2. Look up user by email
     const result = await pool.query(
-      'SELECT * FROM users WHERE email = $1 LIMIT 1',
+      'SELECT id, name, email, phone, address, barangay, role, password_hash, is_active FROM users WHERE email = $1 LIMIT 1',
       [email.trim().toLowerCase()]
     );
 
@@ -157,6 +158,7 @@ async function login(req, res) {
         role:      user.role,
         barangay:  user.barangay,
         phone:     user.phone,
+        address:   user.address ?? null,
       },
     });
 

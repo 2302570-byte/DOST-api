@@ -157,13 +157,19 @@ CREATE TABLE IF NOT EXISTS public.scan_logs (
   eco_awarded    INTEGER,
   eco_tx_hash    TEXT,
   eco_tx_status  TEXT        DEFAULT 'pending'
-    CHECK (eco_tx_status IN ('pending', 'confirmed', 'failed'))
+    CHECK (eco_tx_status IN ('pending', 'confirmed', 'failed')),
+  -- Bin capacity in litres at time of collection (from tiers.capacity_liters).
+  -- NULL until the collector confirms collection.
+  volume_liters  NUMERIC(10, 2)
+    CHECK (volume_liters IS NULL OR volume_liters > 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_scan_logs_bin_id       ON public.scan_logs(bin_id);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_reporter     ON public.scan_logs(reporter_id);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_collected_by ON public.scan_logs(collected_by);
 CREATE INDEX IF NOT EXISTS idx_scan_logs_eco_status   ON public.scan_logs(eco_tx_status);
+CREATE INDEX IF NOT EXISTS idx_scan_logs_volume       ON public.scan_logs(collected_by)
+  WHERE volume_liters IS NOT NULL;
 
 -- =============================================================================
 -- ECO TOKEN TABLES
@@ -245,7 +251,15 @@ ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- eco_redemptions
--- Reward redemptions by residents. tx_hash links to the Hedera burn tx.
+-- Two-step reward redemptions by residents.
+--
+-- Step 1 — resident confirms in app:
+--   Row inserted with tx_status='pending'. Balance NOT yet deducted.
+--   QR value: BESMART-REWARD-<id>
+--
+-- Step 2 — MRF staff scans the QR:
+--   Balance deducted, Hedera burn fires, tx_status → 'confirmed'.
+--   claimed_at and claimed_by are populated.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.eco_redemptions (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -255,10 +269,14 @@ CREATE TABLE IF NOT EXISTS public.eco_redemptions (
   tx_hash     TEXT,
   tx_status   TEXT        NOT NULL DEFAULT 'pending'
     CHECK (tx_status IN ('pending', 'confirmed', 'failed')),
+  claimed_at  TIMESTAMPTZ,
+  claimed_by  UUID        REFERENCES public.users(id),
   redeemed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_eco_redemptions_resident ON public.eco_redemptions(resident_id);
+CREATE INDEX IF NOT EXISTS idx_eco_redemptions_resident       ON public.eco_redemptions(resident_id);
+CREATE INDEX IF NOT EXISTS idx_eco_redemptions_claimed_by     ON public.eco_redemptions(claimed_by);
+CREATE INDEX IF NOT EXISTS idx_eco_redemptions_status_resident ON public.eco_redemptions(resident_id, tx_status);
 
 -- ---------------------------------------------------------------------------
 -- user_eco_balances
@@ -346,3 +364,130 @@ CREATE TABLE IF NOT EXISTS public.collector_reports (
 CREATE INDEX IF NOT EXISTS idx_collector_reports_collector ON public.collector_reports(collector_id);
 CREATE INDEX IF NOT EXISTS idx_collector_reports_status    ON public.collector_reports(status);
 CREATE INDEX IF NOT EXISTS idx_collector_reports_reported  ON public.collector_reports(reported_at DESC);
+
+-- =============================================================================
+-- NOTIFICATIONS TABLE
+-- Single persistent notification store for all roles.
+-- user_id determines ownership; the backend filters by authenticated user.
+-- =============================================================================
+
+DO $$ BEGIN
+  CREATE TYPE public.notification_type AS ENUM (
+    -- Resident
+    'reward',
+    'pickup',
+    'promo',
+    -- MRF worker
+    'scan',
+    'mrf_alert',
+    -- Collector
+    'task',
+    'schedule',
+    'complete',
+    'report',
+    -- Buyer
+    'mrf',
+    'reserve',
+    -- Shared
+    'system'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.notifications (
+  id         UUID                       PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    UUID                       NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  type       public.notification_type   NOT NULL,
+  title      VARCHAR(150)               NOT NULL,
+  body       TEXT                       NOT NULL,
+  is_read    BOOLEAN                    NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ                NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id    ON public.notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read  ON public.notifications(user_id, is_read);
+CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON public.notifications(created_at DESC);
+
+-- =============================================================================
+-- MRF FACILITIES & RESERVATIONS
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- mrf_facility_status enum
+-- ---------------------------------------------------------------------------
+DO $$ BEGIN
+  CREATE TYPE public.mrf_facility_status AS ENUM ('available', 'full', 'reserved', 'closed');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- mrf_facilities
+-- Named MRF locations with GPS coordinates, capacity, and bidding prices.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.mrf_facilities (
+  id               UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  name             VARCHAR(150) NOT NULL,
+  barangay         VARCHAR(150) NOT NULL,
+  address          TEXT,
+  latitude         NUMERIC(10, 7),
+  longitude        NUMERIC(10, 7),
+  status           public.mrf_facility_status NOT NULL DEFAULT 'available',
+  capacity_kg      NUMERIC(10, 2),
+  starting_bid     NUMERIC(12, 2),
+  buyout_price     NUMERIC(12, 2),
+  managed_by       UUID         REFERENCES public.users(id) ON DELETE SET NULL,
+  is_active        BOOLEAN      NOT NULL DEFAULT true,
+  created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mrf_facilities_status   ON public.mrf_facilities(status);
+CREATE INDEX IF NOT EXISTS idx_mrf_facilities_barangay ON public.mrf_facilities(barangay);
+
+DROP TRIGGER IF EXISTS trg_mrf_facilities_updated_at ON public.mrf_facilities;
+CREATE TRIGGER trg_mrf_facilities_updated_at
+  BEFORE UPDATE ON public.mrf_facilities
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+INSERT INTO public.mrf_facilities
+  (name, barangay, latitude, longitude, status, starting_bid, buyout_price)
+VALUES
+  ('MRF Alangilan', 'Brgy. Alangilan',       13.7500000, 121.0600000, 'available', 1200, 3500),
+  ('MRF Kumintang', 'Brgy. Kumintang Ibaba',  13.7650000, 121.0550000, 'full',      2000, 5800),
+  ('MRF Pallocan',  'Brgy. Pallocan West',    13.7400000, 121.0700000, 'available', 1500, 4200),
+  ('MRF Cuta',      'Brgy. Cuta',             13.7550000, 121.0650000, 'full',      3000, 7500)
+ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- reservation_status enum
+-- ---------------------------------------------------------------------------
+DO $$ BEGIN
+  CREATE TYPE public.reservation_status AS ENUM
+    ('pending', 'won', 'lost', 'completed', 'cancelled');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- mrf_reservations
+-- Buyer bids on full MRF facilities; status tracks the bid lifecycle.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.mrf_reservations (
+  id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  facility_id     UUID         NOT NULL REFERENCES public.mrf_facilities(id) ON DELETE CASCADE,
+  buyer_id        UUID         NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  material        VARCHAR(100),
+  weight_kg       NUMERIC(10, 2),
+  bid_amount      NUMERIC(12, 2) NOT NULL CHECK (bid_amount > 0),
+  status          public.reservation_status NOT NULL DEFAULT 'pending',
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mrf_reservations_buyer    ON public.mrf_reservations(buyer_id);
+CREATE INDEX IF NOT EXISTS idx_mrf_reservations_facility ON public.mrf_reservations(facility_id);
+CREATE INDEX IF NOT EXISTS idx_mrf_reservations_status   ON public.mrf_reservations(status);
+
+DROP TRIGGER IF EXISTS trg_mrf_reservations_updated_at ON public.mrf_reservations;
+CREATE TRIGGER trg_mrf_reservations_updated_at
+  BEFORE UPDATE ON public.mrf_reservations
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();

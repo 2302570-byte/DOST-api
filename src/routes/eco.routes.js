@@ -109,12 +109,31 @@ router.delete(
 );
 
 // POST /api/eco/rewards/:id/redeem
-// Resident redeems ECO for a reward
+// Resident redeems ECO for a reward (Step 1 — creates pending QR, no balance deduction yet)
 router.post(
   '/rewards/:id/redeem',
   authenticate,
   requireRole('resident'),
   eco.redeemReward
+);
+
+// GET /api/eco/redemptions/pending
+// Resident fetches their own unclaimed pending redemptions (for "Ongoing" UI state)
+router.get(
+  '/redemptions/pending',
+  authenticate,
+  requireRole('resident'),
+  eco.getPendingRedemptions
+);
+
+// POST /api/eco/rewards/claim
+// MRF worker scans a BESMART-REWARD-<uuid> QR → deducts balance + burns on-chain (Step 2)
+router.post(
+  '/rewards/claim',
+  authenticate,
+  requireRole('mrf_worker'),
+  issueLimiter,
+  eco.claimRedemption
 );
 
 module.exports = router;
