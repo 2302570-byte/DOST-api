@@ -63,11 +63,14 @@ CREATE TABLE IF NOT EXISTS public.users (
   eco_points    INTEGER       NOT NULL DEFAULT 0,
   last_login    TIMESTAMPTZ,
   created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-  updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+  updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  deleted_at    TIMESTAMPTZ,
+  deleted_by    UUID          REFERENCES public.users(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON public.users(email);
 CREATE INDEX IF NOT EXISTS idx_users_role  ON public.users(role);
+CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON public.users(deleted_at) WHERE deleted_at IS NOT NULL;
 
 DROP TRIGGER IF EXISTS trg_users_updated_at ON public.users;
 CREATE TRIGGER trg_users_updated_at
@@ -496,3 +499,171 @@ DROP TRIGGER IF EXISTS trg_mrf_reservations_updated_at ON public.mrf_reservation
 CREATE TRIGGER trg_mrf_reservations_updated_at
   BEFORE UPDATE ON public.mrf_reservations
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- =============================================================================
+-- SUPER ADMIN: BARANGAY MANAGEMENT & HISTORY
+-- Tables for the Super Admin portal: canonical barangays, clusters, collection
+-- route history, audit trails for accounts and barangays, and the `announcements`
+-- broadcast table (kept separate from the per-user `notifications` table above
+-- to avoid a name collision).
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- account_action enum
+-- Lifecycle events tracked for Punong Barangay accounts.
+-- ---------------------------------------------------------------------------
+DO $$ BEGIN
+  CREATE TYPE public.account_action AS ENUM (
+    'created',
+    'enabled',
+    'disabled',
+    'deleted'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- barangays
+-- Canonical list of barangays in Batangas City.
+-- The punong_barangay user links to this via users.barangay = barangays.name.
+-- Supports soft delete so historical records remain queryable.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.barangays (
+  id              UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            VARCHAR(150)  NOT NULL UNIQUE,
+  captain         VARCHAR(150),
+  contact_email   VARCHAR(150),
+  status          VARCHAR(20)   NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'inactive')),
+  deleted_at      TIMESTAMPTZ,
+  deleted_by      UUID          REFERENCES public.users(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_barangays_deleted_at ON public.barangays(deleted_at) WHERE deleted_at IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_barangays_updated_at ON public.barangays;
+CREATE TRIGGER trg_barangays_updated_at
+  BEFORE UPDATE ON public.barangays
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- clusters
+-- Groupings of barangays for collection operations.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.clusters (
+  id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       VARCHAR(100) NOT NULL UNIQUE,
+  label      VARCHAR(100) NOT NULL,
+  created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+DROP TRIGGER IF EXISTS trg_clusters_updated_at ON public.clusters;
+CREATE TRIGGER trg_clusters_updated_at
+  BEFORE UPDATE ON public.clusters
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- cluster_barangays
+-- Many-to-many junction. A barangay belongs to at most one cluster
+-- (enforced by the unique index on barangay_id).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.cluster_barangays (
+  cluster_id   UUID NOT NULL REFERENCES public.clusters(id)  ON DELETE CASCADE,
+  barangay_id  UUID NOT NULL REFERENCES public.barangays(id) ON DELETE CASCADE,
+  assigned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (cluster_id, barangay_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cb_one_cluster_per_barangay
+  ON public.cluster_barangays(barangay_id);
+CREATE INDEX IF NOT EXISTS idx_cb_cluster_id ON public.cluster_barangays(cluster_id);
+
+-- ---------------------------------------------------------------------------
+-- collection_routes
+-- History of all optimized routes dispatched by Super Admin.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.collection_routes (
+  id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  route_id          VARCHAR(30)  NOT NULL UNIQUE,
+  date              DATE         NOT NULL,
+  bin_ids           UUID[]       NOT NULL DEFAULT '{}',
+  distance_km       NUMERIC(6,1),
+  estimated_minutes INTEGER,
+  algorithm         VARCHAR(50)  DEFAULT 'Nearest Neighbor',
+  truck_no          VARCHAR(50),
+  sent_to           VARCHAR(100) DEFAULT 'Collector Admin',
+  status            VARCHAR(20)  NOT NULL DEFAULT 'delivered'
+    CHECK (status IN ('completed', 'in_progress', 'delivered', 'cancelled')),
+  optimized_at      TIMESTAMPTZ,
+  sent_at           TIMESTAMPTZ,
+  created_by        UUID         REFERENCES public.users(id) ON DELETE SET NULL,
+  created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_routes_date   ON public.collection_routes(date DESC);
+CREATE INDEX IF NOT EXISTS idx_collection_routes_status ON public.collection_routes(status);
+
+-- ---------------------------------------------------------------------------
+-- account_history
+-- Audit trail of Punong Barangay account lifecycle events. Snapshot columns
+-- (barangay_name, captain_name, cluster_name) capture state at action time.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.account_history (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID        NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  action          public.account_action NOT NULL,
+  performed_by    UUID        REFERENCES public.users(id) ON DELETE SET NULL,
+  barangay_name   VARCHAR(150),
+  captain_name    VARCHAR(100),
+  cluster_name    VARCHAR(100),
+  details         TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_history_user_id    ON public.account_history(user_id);
+CREATE INDEX IF NOT EXISTS idx_account_history_action     ON public.account_history(action);
+CREATE INDEX IF NOT EXISTS idx_account_history_created_at ON public.account_history(created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- barangay_history
+-- Audit trail of barangay create/update/delete events.
+-- Stores a JSONB snapshot of barangay state at the time of the action.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.barangay_history (
+  id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+  barangay_id   UUID          NOT NULL REFERENCES public.barangays(id) ON DELETE CASCADE,
+  action        VARCHAR(20)   NOT NULL CHECK (action IN ('created', 'updated', 'deleted')),
+  snapshot      JSONB         NOT NULL,
+  performed_by  UUID          REFERENCES public.users(id) ON DELETE SET NULL,
+  performed_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_barangay_history_barangay_id  ON public.barangay_history(barangay_id);
+CREATE INDEX IF NOT EXISTS idx_barangay_history_action      ON public.barangay_history(action);
+CREATE INDEX IF NOT EXISTS idx_barangay_history_performed_at ON public.barangay_history(performed_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- announcements
+-- Broadcast messages sent by Super Admin to portal users (one row per
+-- announcement, scoped by `target`). Separate from the per-user
+-- `notifications` table, which tracks individual read state via user_id.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.announcements (
+  id        UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  type      VARCHAR(30)  NOT NULL DEFAULT 'announcement'
+    CHECK (type IN ('announcement', 'schedule', 'complete', 'report', 'task')),
+  title     VARCHAR(200) NOT NULL,
+  body      TEXT         NOT NULL,
+  target    VARCHAR(50)  NOT NULL DEFAULT 'all',
+  priority  VARCHAR(20)  NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('normal', 'urgent')),
+  sent_by   UUID         REFERENCES public.users(id) ON DELETE SET NULL,
+  sent_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  read      BOOLEAN      NOT NULL DEFAULT false
+);
+
+CREATE INDEX IF NOT EXISTS idx_announcements_sent_at  ON public.announcements(sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_announcements_priority ON public.announcements(priority);
