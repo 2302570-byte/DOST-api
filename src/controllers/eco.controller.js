@@ -279,13 +279,15 @@ async function getTransactions(req, res) {
 }
 
 // ─── GET /api/eco/rewards ─────────────────────────────────────────────────────
-// List active rewards available for redemption.
+// List rewards. By default returns only active rewards (for residents/buyers).
+// Pass ?all=true to include inactive rewards (admin view for punong_barangay).
 async function getRewards(req, res) {
   try {
+    const showAll = req.query.all === 'true';
     const { rows } = await pool.query(
-      `SELECT id, name, description, category, partner, eco_cost, stock, featured
+      `SELECT id, name, description, category, partner, eco_cost, stock, featured, is_active
        FROM eco_rewards
-       WHERE is_active = true
+       ${showAll ? '' : 'WHERE is_active = true'}
        ORDER BY featured DESC, eco_cost ASC`
     );
     res.json(rows);
@@ -296,7 +298,9 @@ async function getRewards(req, res) {
 }
 
 // ─── POST /api/eco/rewards/:id/redeem ────────────────────────────────────────
-// Resident redeems ECO for a reward.
+// Step 1 of two-step redemption.
+// Resident confirms in app → pending row is inserted, QR is returned.
+// Balance is NOT deducted here — that happens when MRF staff scan the QR.
 async function redeemReward(req, res) {
   const { id: rewardId } = req.params;
   const residentId       = req.user.id;
@@ -316,9 +320,11 @@ async function redeemReward(req, res) {
     }
     const reward = rewardResult.rows[0];
 
-    // Check cached balance
+    // Check cached balance (must have enough to proceed, even though we
+    // don't deduct until claim time — prevents issuing QRs the resident
+    // can never actually claim)
     const balResult = await client.query(
-      'SELECT balance FROM user_eco_balances WHERE user_id = $1 FOR UPDATE',
+      'SELECT balance FROM user_eco_balances WHERE user_id = $1',
       [residentId]
     );
     const currentBalance = Number(balResult.rows[0]?.balance ?? 0);
@@ -331,25 +337,21 @@ async function redeemReward(req, res) {
       });
     }
 
-    // Decrement stock if limited
-    if (reward.stock !== null) {
-      const stockResult = await client.query(
-        'UPDATE eco_rewards SET stock = stock - 1 WHERE id = $1 AND stock > 0 RETURNING stock',
-        [rewardId]
-      );
-      if (stockResult.rowCount === 0) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Reward is out of stock.' });
-      }
+    // Prevent duplicate pending redemptions for the same reward
+    const dupeResult = await client.query(
+      `SELECT id FROM eco_redemptions
+       WHERE resident_id = $1 AND reward_id = $2 AND tx_status = 'pending'`,
+      [residentId, rewardId]
+    );
+    if (dupeResult.rowCount > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error:        'You already have a pending redemption for this reward.',
+        redemptionId: dupeResult.rows[0].id,
+      });
     }
 
-    // Deduct cached balance
-    await client.query(
-      'UPDATE user_eco_balances SET balance = balance - $1, updated_at = now() WHERE user_id = $2',
-      [reward.eco_cost, residentId]
-    );
-
-    // Insert pending redemption
+    // Insert pending redemption — no balance deduction yet
     const redemptionResult = await client.query(
       `INSERT INTO eco_redemptions (resident_id, reward_id, eco_cost, tx_status)
        VALUES ($1, $2, $3, 'pending') RETURNING id`,
@@ -358,32 +360,11 @@ async function redeemReward(req, res) {
 
     await client.query('COMMIT');
 
-    const redemptionId = redemptionResult.rows[0].id;
-
-    // ── Call blockchain ──
-    try {
-      const { txHash } = await redeemEco(residentId, reward.eco_cost, redemptionId);
-      await pool.query(
-        "UPDATE eco_redemptions SET tx_hash = $1, tx_status = 'confirmed' WHERE id = $2",
-        [txHash, redemptionId]
-      );
-      return res.json({
-        rewardName:  reward.name,
-        ecoCost:     reward.eco_cost,
-        txHash,
-        redemptionId,
-      });
-    } catch (chainErr) {
-      await pool.query(
-        "UPDATE eco_redemptions SET tx_status = 'failed' WHERE id = $1",
-        [redemptionId]
-      );
-      console.error('On-chain redeem failed:', chainErr);
-      return res.status(502).json({
-        error: 'Redemption recorded but blockchain transaction failed. Support has been notified.',
-        redemptionId,
-      });
-    }
+    return res.status(201).json({
+      redemptionId: redemptionResult.rows[0].id,
+      rewardName:   reward.name,
+      ecoCost:      reward.eco_cost,
+    });
 
   } catch (err) {
     await client.query('ROLLBACK');
@@ -394,86 +375,276 @@ async function redeemReward(req, res) {
   }
 }
 
-// ─── POST /api/eco/rewards ────────────────────────────────────────────────────
-async function createReward(req, res) {
-  const { name, description, category, partner, ecoCost, eco_cost, stock, featured, isActive, is_active } = req.body;
-  const costValue = ecoCost ?? eco_cost;
-  const activeValue = isActive ?? is_active ?? true;
-  
-  if (!name?.trim() || !costValue) {
-    return res.status(400).json({ error: 'name and ecoCost are required.' });
-  }
+// ─── GET /api/eco/redemptions/pending ────────────────────────────────────────
+// Returns the logged-in resident's pending (unclaimed) redemptions so the
+// Rewards screen can show "Ongoing" on cards with an in-flight QR.
+async function getPendingRedemptions(req, res) {
   try {
     const { rows } = await pool.query(
-      `INSERT INTO public.eco_rewards (name, description, category, partner, eco_cost, stock, featured, is_active)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       RETURNING id, name, description, category, partner, eco_cost, stock, featured, is_active`,
-      [name.trim(), description ?? null, category ?? null, partner ?? null,
-       Number(costValue), stock ?? null, featured ?? false, activeValue]
+      `SELECT
+         er.id            AS redemption_id,
+         er.reward_id,
+         er.eco_cost,
+         er.redeemed_at,
+         r.name           AS reward_name
+       FROM eco_redemptions er
+       JOIN eco_rewards r ON r.id = er.reward_id
+       WHERE er.resident_id = $1
+         AND er.tx_status = 'pending'
+       ORDER BY er.redeemed_at DESC`,
+      [req.user.id]
     );
-    res.status(201).json(rows[0]);
+    res.json(rows);
   } catch (err) {
-    console.error('createReward error:', err.message);
+    console.error('getPendingRedemptions error:', err);
     res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+
+// ─── POST /api/eco/rewards/claim ─────────────────────────────────────────────
+// Step 2 of two-step redemption.
+// MRF staff scans the resident's BESMART-REWARD-<uuid> QR code.
+// Deducts balance, fires blockchain burn, marks redemption confirmed.
+// Body: { qrValue: "BESMART-REWARD-<uuid>" }
+async function claimRedemption(req, res) {
+  const { qrValue } = req.body;
+  const mrfWorkerId = req.user.id;
+
+  const REWARD_PREFIX = 'BESMART-REWARD-';
+  if (!qrValue || !qrValue.startsWith(REWARD_PREFIX)) {
+    return res.status(400).json({ error: 'Invalid reward QR code.' });
+  }
+  const redemptionId = qrValue.slice(REWARD_PREFIX.length).trim();
+  if (!redemptionId) {
+    return res.status(400).json({ error: 'Invalid reward QR code.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock the redemption row
+    let redemptionResult;
+    try {
+      redemptionResult = await client.query(
+        `SELECT er.*, r.name AS reward_name
+         FROM eco_redemptions er
+         JOIN eco_rewards r ON r.id = er.reward_id
+         WHERE er.id = $1
+         FOR UPDATE`,
+        [redemptionId]
+      );
+    } catch (dbErr) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Invalid reward QR code — unrecognised format.' });
+    }
+
+    if (redemptionResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Redemption not found.' });
+    }
+
+    const redemption = redemptionResult.rows[0];
+
+    if (redemption.tx_status === 'confirmed') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'This reward has already been claimed.' });
+    }
+    if (redemption.tx_status === 'failed') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'This redemption failed and cannot be claimed.' });
+    }
+
+    // Deduct resident balance
+    const balResult = await client.query(
+      'SELECT balance FROM user_eco_balances WHERE user_id = $1 FOR UPDATE',
+      [redemption.resident_id]
+    );
+    const currentBalance = Number(balResult.rows[0]?.balance ?? 0);
+    if (currentBalance < redemption.eco_cost) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error:   'Resident has insufficient ECO balance.',
+        balance: currentBalance,
+        needed:  redemption.eco_cost,
+      });
+    }
+
+    await client.query(
+      'UPDATE user_eco_balances SET balance = balance - $1, updated_at = now() WHERE user_id = $2',
+      [redemption.eco_cost, redemption.resident_id]
+    );
+
+    await client.query('COMMIT');
+
+    // ── Call blockchain ──
+    try {
+      const { txHash } = await redeemEco(
+        redemption.resident_id,
+        redemption.eco_cost,
+        redemptionId,
+      );
+      await pool.query(
+        `UPDATE eco_redemptions
+         SET tx_hash = $1, tx_status = 'confirmed',
+             claimed_at = now(), claimed_by = $2
+         WHERE id = $3`,
+        [txHash, mrfWorkerId, redemptionId]
+      );
+
+      // Fetch resident name for the success response
+      const userResult = await pool.query(
+        'SELECT name FROM users WHERE id = $1',
+        [redemption.resident_id]
+      );
+
+      return res.json({
+        redemptionId,
+        rewardName:   redemption.reward_name,
+        ecoCost:      redemption.eco_cost,
+        residentName: userResult.rows[0]?.name ?? '—',
+        txHash,
+      });
+
+    } catch (chainErr) {
+      // Roll back the balance deduction — the resident keeps their ECO
+      await pool.query(
+        `UPDATE user_eco_balances
+         SET balance = balance + $1, updated_at = now()
+         WHERE user_id = $2`,
+        [redemption.eco_cost, redemption.resident_id]
+      );
+      await pool.query(
+        "UPDATE eco_redemptions SET tx_status = 'failed' WHERE id = $1",
+        [redemptionId]
+      );
+      console.error('On-chain claim failed:', chainErr);
+      return res.status(502).json({
+        error: 'Claim recorded but blockchain transaction failed. Support has been notified.',
+        redemptionId,
+      });
+    }
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('claimRedemption error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  } finally {
+    client.release();
+  }
+}
+
+// ─── POST /api/eco/rewards ────────────────────────────────────────────────────
+// Punong barangay creates a new reward in the catalog.
+async function createReward(req, res) {
+  const { name, description, category, partner, ecoCost, stock, featured, isActive } = req.body;
+
+  if (!name || !ecoCost) {
+    return res.status(400).json({ error: 'name and ecoCost are required.' });
+  }
+  if (isNaN(Number(ecoCost)) || Number(ecoCost) <= 0) {
+    return res.status(400).json({ error: 'ecoCost must be a positive integer.' });
+  }
+  if (stock !== undefined && stock !== null && (isNaN(Number(stock)) || Number(stock) < 0)) {
+    return res.status(400).json({ error: 'stock must be a non-negative integer.' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO eco_rewards (name, description, category, partner, eco_cost, stock, featured, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, name, description, category, partner, eco_cost, stock, featured, is_active, created_at`,
+      [
+        name.trim(),
+        description?.trim() ?? null,
+        category?.trim()    ?? null,
+        partner?.trim()     ?? null,
+        Number(ecoCost),
+        stock !== undefined && stock !== null ? Number(stock) : null,
+        featured  ?? false,
+        isActive  ?? true,
+      ],
+    );
+    return res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('createReward error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
   }
 }
 
 // ─── PUT /api/eco/rewards/:id ─────────────────────────────────────────────────
+// Punong barangay updates a reward.
 async function updateReward(req, res) {
-  const { name, description, category, partner, ecoCost, eco_cost, stock, featured, isActive, is_active } = req.body;
-  const costValue = ecoCost ?? eco_cost;
-  const activeValue = isActive ?? is_active;
-  
+  const { id } = req.params;
+  const { name, description, category, partner, ecoCost, stock, featured, isActive } = req.body;
+
+  if (
+    name === undefined && description === undefined && category === undefined &&
+    partner === undefined && ecoCost === undefined && stock === undefined &&
+    featured === undefined && isActive === undefined
+  ) {
+    return res.status(400).json({ error: 'Provide at least one field to update.' });
+  }
+
+  if (ecoCost !== undefined && (isNaN(Number(ecoCost)) || Number(ecoCost) <= 0)) {
+    return res.status(400).json({ error: 'ecoCost must be a positive integer.' });
+  }
+  if (stock !== undefined && stock !== null && (isNaN(Number(stock)) || Number(stock) < 0)) {
+    return res.status(400).json({ error: 'stock must be a non-negative integer.' });
+  }
+
   try {
+    const existing = await pool.query('SELECT id FROM eco_rewards WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Reward not found.' });
+    }
+
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    if (name        !== undefined) { fields.push(`name = $${idx++}`);        values.push(name.trim()); }
+    if (description !== undefined) { fields.push(`description = $${idx++}`); values.push(description?.trim() ?? null); }
+    if (category    !== undefined) { fields.push(`category = $${idx++}`);    values.push(category?.trim() ?? null); }
+    if (partner     !== undefined) { fields.push(`partner = $${idx++}`);     values.push(partner?.trim() ?? null); }
+    if (ecoCost     !== undefined) { fields.push(`eco_cost = $${idx++}`);    values.push(Number(ecoCost)); }
+    if (stock       !== undefined) { fields.push(`stock = $${idx++}`);       values.push(stock !== null ? Number(stock) : null); }
+    if (featured    !== undefined) { fields.push(`featured = $${idx++}`);    values.push(featured); }
+    if (isActive    !== undefined) { fields.push(`is_active = $${idx++}`);   values.push(isActive); }
+
+    values.push(id);
+
     const { rows } = await pool.query(
-      `UPDATE public.eco_rewards
-       SET name        = COALESCE($1, name),
-           description = COALESCE($2, description),
-           category    = COALESCE($3, category),
-           partner     = COALESCE($4, partner),
-           eco_cost    = COALESCE($5, eco_cost),
-           stock       = COALESCE($6, stock),
-           featured    = COALESCE($7, featured),
-           is_active   = COALESCE($8, is_active)
-       WHERE id = $9
-       RETURNING id, name, description, category, partner, eco_cost, stock, featured, is_active`,
-      [name?.trim() ?? null, description ?? null, category ?? null, partner ?? null,
-       costValue != null ? Number(costValue) : null,
-       stock    != null ? Number(stock)    : null,
-       featured ?? null, activeValue ?? null, req.params.id]
+      `UPDATE eco_rewards SET ${fields.join(', ')}
+       WHERE id = $${idx}
+       RETURNING id, name, description, category, partner, eco_cost, stock, featured, is_active, created_at`,
+      values,
     );
-    if (rows.length === 0) return res.status(404).json({ error: 'Reward not found.' });
-    res.json(rows[0]);
+    return res.json(rows[0]);
   } catch (err) {
-    console.error('updateReward error:', err.message);
-    res.status(500).json({ error: 'Internal server error.' });
+    console.error('updateReward error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
   }
 }
 
 // ─── DELETE /api/eco/rewards/:id ──────────────────────────────────────────────
+// Soft-deletes a reward (sets is_active = false) to preserve redemption history.
 async function deleteReward(req, res) {
+  const { id } = req.params;
   try {
-    const result = await pool.query(
-      'DELETE FROM public.eco_rewards WHERE id = $1 RETURNING id', [req.params.id]
+    const { rows } = await pool.query(
+      `UPDATE eco_rewards SET is_active = false
+       WHERE id = $1
+       RETURNING id`,
+      [id],
     );
-    if (result.rowCount === 0) return res.status(404).json({ error: 'Reward not found.' });
-    res.json({ message: 'Reward deleted.' });
-  } catch (err) {
-    console.error('deleteReward error:', err.message);
-    console.error('Error code:', err.code);
-    console.error('Error detail:', err.detail);
-    
-    // Check if it's a foreign key constraint error
-    if (err.code === '23503') {
-      return res.status(409).json({ 
-        error: 'Cannot delete reward. It has been redeemed by residents. Please deactivate it instead of deleting.' 
-      });
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Reward not found.' });
     }
-    
-    res.status(500).json({ 
-      error: 'Internal server error.',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
+    return res.json({ message: 'Reward deactivated.' });
+  } catch (err) {
+    console.error('deleteReward error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
   }
 }
 
@@ -486,6 +657,8 @@ module.exports = {
   getTransactions,
   getRewards,
   redeemReward,
+  getPendingRedemptions,
+  claimRedemption,
   createReward,
   updateReward,
   deleteReward,

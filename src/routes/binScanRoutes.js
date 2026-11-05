@@ -379,12 +379,15 @@ router.post(
       }
 
       // Find the resident who reported this bin (most recent FULL scan)
+      // Also pull the tier's capacity_liters for volume tracking
       const scanResult = await client.query(
-        `SELECT id, reporter_id
-           FROM public.scan_logs
-           WHERE bin_id = $1
-             AND collected_at IS NULL
-           ORDER BY scanned_at DESC
+        `SELECT sl.id, sl.reporter_id, t.capacity_liters
+           FROM public.scan_logs sl
+           JOIN public.bins b       ON b.id  = sl.bin_id
+           LEFT JOIN public.tiers t ON t.id  = b.tier_id
+           WHERE sl.bin_id = $1
+             AND sl.collected_at IS NULL
+           ORDER BY sl.scanned_at DESC
            LIMIT 1`,
         [binId]
       );
@@ -397,6 +400,7 @@ router.post(
       scanLogId  = scanResult.rows[0].id;
       residentId = scanResult.rows[0].reporter_id;
       ecoReward  = bin.eco_reward || 0;
+      const volumeLiters = scanResult.rows[0].capacity_liters ?? null;
 
       // Get resident name for the response
       const residentResult = await client.query(
@@ -419,9 +423,10 @@ router.post(
            SET collected_by   = $1,
                collected_at   = NOW(),
                eco_awarded    = $2,
-               eco_tx_status  = 'pending'
-           WHERE id = $3`,
-        [collectorId, ecoReward, scanLogId]
+               eco_tx_status  = 'pending',
+               volume_liters  = $3
+           WHERE id = $4`,
+        [collectorId, ecoReward, volumeLiters, scanLogId]
       );
 
       await client.query('COMMIT');
@@ -471,6 +476,7 @@ router.post(
           bin_id:        binId,
           resident_name: residentName,
           eco_awarded:   ecoReward,
+          volume_liters: volumeLiters,
           tx_hash:       txHash,
           scan_log_id:   scanLogId,
         });
@@ -487,6 +493,7 @@ router.post(
           bin_id:        binId,
           resident_name: residentName,
           eco_awarded:   ecoReward,
+          volume_liters: volumeLiters,
           scan_log_id:   scanLogId,
         });
       }

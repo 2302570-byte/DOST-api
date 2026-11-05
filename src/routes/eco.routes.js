@@ -74,6 +74,7 @@ router.get(
 
 // GET  /api/eco/rewards
 // List active rewards (all authenticated users can browse)
+// Pass ?all=true to include inactive rewards (punong_barangay admin view)
 router.get(
   '/rewards',
   authenticate,
@@ -81,7 +82,7 @@ router.get(
 );
 
 // POST /api/eco/rewards
-// Create a new reward (Punong Barangay only)
+// Punong barangay creates a new reward
 router.post(
   '/rewards',
   authenticate,
@@ -90,7 +91,7 @@ router.post(
 );
 
 // PUT /api/eco/rewards/:id
-// Update an existing reward (Punong Barangay only)
+// Punong barangay updates a reward
 router.put(
   '/rewards/:id',
   authenticate,
@@ -99,7 +100,7 @@ router.put(
 );
 
 // DELETE /api/eco/rewards/:id
-// Soft-delete a reward (Punong Barangay only)
+// Punong barangay soft-deletes a reward (sets is_active = false)
 router.delete(
   '/rewards/:id',
   authenticate,
@@ -108,12 +109,31 @@ router.delete(
 );
 
 // POST /api/eco/rewards/:id/redeem
-// Resident redeems ECO for a reward
+// Resident redeems ECO for a reward (Step 1 — creates pending QR, no balance deduction yet)
 router.post(
   '/rewards/:id/redeem',
   authenticate,
   requireRole('resident'),
   eco.redeemReward
+);
+
+// GET /api/eco/redemptions/pending
+// Resident fetches their own unclaimed pending redemptions (for "Ongoing" UI state)
+router.get(
+  '/redemptions/pending',
+  authenticate,
+  requireRole('resident'),
+  eco.getPendingRedemptions
+);
+
+// POST /api/eco/rewards/claim
+// MRF worker scans a BESMART-REWARD-<uuid> QR → deducts balance + burns on-chain (Step 2)
+router.post(
+  '/rewards/claim',
+  authenticate,
+  requireRole('mrf_worker'),
+  issueLimiter,
+  eco.claimRedemption
 );
 
 module.exports = router;
